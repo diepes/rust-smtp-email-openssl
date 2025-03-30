@@ -1,0 +1,10 @@
+[package]
+name = "send-smtp-mail"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+base64 = "0.22.1"
+chrono = "0.4.40"
+colored = "3.0.0"
+dotenv = "0.15.0"
