@@ -3,6 +3,8 @@ use base64::Engine; // trait
 use colored::*;
 use dotenv::dotenv;
 use std::env;
+use std::fs;
+//use std::io::{self, Write};
 use std::io::{BufRead, BufReader, Write};
 use std::process::{ChildStderr, ChildStdin, ChildStdout, Command, Stdio};
 use std::sync::mpsc::{self, Receiver, Sender};
@@ -33,10 +35,20 @@ fn main() {
     // subject has default fallback
     let subject = env::var("smtp_subject").unwrap_or_else(|_| {
         format!(
-            "Test mail Rust OpenSSL - smtp email sent at {}",
+            "Test mail Rust OpenSSL - smtp email sent with attachement at {}",
             chrono::Local::now()
         )
     });
+
+    // Read the attachment file (e.g., a small text file or PDF)
+    let attachment_path =
+        env::var("smtp_attachment_path").unwrap_or_else(|_| format!("example.txt")); // Replace with your file path
+    let attachment_data = fs::read(&attachment_path).expect(&format!(
+        "Failed to read attachment file {}",
+        attachment_path
+    ));
+    let attachment_encoded = b64.encode(&attachment_data);
+    let attachment_name = &attachment_path;
 
     println!(
         "[DEBUG] Connecting to SMTP server: {} -starttls smtp",
@@ -45,7 +57,17 @@ fn main() {
 
     // Start openssl s_client process
     let mut child = Command::new("openssl")
-        .args(["s_client", "-connect", &smtp_server, "-starttls", "smtp"])
+        .args([
+            "s_client",
+            "-connect",
+            &smtp_server,
+            "-starttls",
+            "smtp",
+            // "-quiet", // hides "CONNECTED" message
+            "-tls1_2",
+            // "-no_legacy_server_connect",
+            // "-legacy_renegotiation",
+        ])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -64,6 +86,7 @@ fn main() {
     // SMTP Connected
     wait_for_response_out(&rx_out, "CONNECTED");
     thread::sleep(std::time::Duration::from_secs(1));
+    // wait_for_response_err(&rx_err, "250-SIZE");
     wait_for_response_err(&rx_err, "250 STARTTLS");
     // sleep for 1 second
     thread::sleep(std::time::Duration::from_secs(1));
@@ -92,19 +115,93 @@ fn main() {
     wait_for_response_out(&rx_out, "250");
 
     send_cmd(&stdin, "DATA");
-    wait_for_response_out(&rx_out, "354");
+    wait_for_response_out(&rx_out, "354 Start");
+
+    // Chunk the base64 output into lines of 76 characters
+    let chunked_encoded: String = attachment_encoded
+        .as_bytes()
+        .chunks(76)
+        .map(|chunk| std::str::from_utf8(chunk).unwrap_or(""))
+        .collect::<Vec<&str>>()
+        .join("\r\n");
 
     // Send email content
+
+    // MIME multipart message
+    let boundary = "boundary123456789";
+    // Use `chunked_encoded` instead of `attachment_encoded` in the email body
+    let _email_body = format!(
+        "From: {from}\r\n\
+        To: {to}\r\n\
+        Subject: {subject}\r\n\
+        MIME-Version: 1.0\r\n\
+        Content-Type: multipart/mixed; boundary=\"{boundary}\"\r\n\
+        \r\n\
+        --{boundary}\r\n\
+        Content-Type: text/plain; charset=utf-8\r\n\
+        \r\n\
+        This is the email body.\r\n\
+        \r\n\
+        --{boundary}\r\n\
+        Content-Type: application/octet-stream\r\n\
+        Content-Disposition: attachment; filename={attachment_name}\r\n\
+        Content-Transfer-Encoding: base64\r\n\
+        \r\n\
+        {chunked_encoded}\r\n\
+        --{boundary}--\r\n",
+        from = from,
+        to = to,
+        subject = subject,
+        boundary = boundary,
+        attachment_name = attachment_name,
+        chunked_encoded = chunked_encoded
+    );
+
     let email_body = format!(
-        "Test smtp: Rust OpenSSL\n\nFrom={}\nTo={}\nSubject={}\n",
-        from, to, subject
+        "From: {from}\r\n\
+        To: {to}\r\n\
+        Subject: {subject}\r\n\
+        MIME-Version: 1.0\r\n\
+        Content-Type: multipart/mixed; boundary=\"{boundary}\"\r\n\
+        \r\n\
+        --{boundary}\r\n\
+        Content-Type: text/plain; charset=utf-8\r\n\
+        \r\n\
+        This is the email body.\r\n\
+        \r\n\
+        Was sent from {from} to {to}.\r\n\
+        \r\n\
+        Subject: \"{subject}\"\r\n\
+        \r\n\
+        See the attached file!\r\n\
+        \r\n\
+        --{boundary}\r\n\
+        Content-Type: application/octet-stream\r\n\
+        Content-Disposition: attachment; filename={attachment_name}\r\n\
+        Content-Transfer-Encoding: base64\r\n\
+        \r\n\
+        {chunked_encoded}\r\n\
+        --{boundary}--\r\n",
+        from = from,
+        to = to,
+        subject = subject,
+        attachment_name = attachment_name,
+        chunked_encoded = chunked_encoded,
+        boundary = boundary
     );
-    let email = format!(
-        "From: {}\r\nTo: {}\r\nSubject: {}\r\n\r\n{}",
-        from, to, subject, email_body
+    // Send the email
+    thread::sleep(std::time::Duration::from_secs(1));
+    println!("{}", "[DEBUG] ... Sending email body:".green());
+    send_cmd(&stdin, &email_body);
+
+    // sleep for 5 second
+
+    // Send "." dot
+    println!(
+        "{}",
+        "[DEBUG] ... Sending final dot for email body:".green()
     );
-    send_cmd(&stdin, &email);
-    send_cmd(&stdin, "\r\n."); // send_cmd will add \r\n
+    send_cmd(&stdin, "\r\n.");
     wait_for_response_out(&rx_out, "250");
 
     send_cmd(&stdin, "QUIT");
@@ -114,11 +211,15 @@ fn main() {
     handle_out.join().unwrap();
     handle_err.join().unwrap();
 
-    println!("{}","[DEBUG] Email sent successfully!".on_green());
+    println!("{}", "[DEBUG] Email sent successfully!".on_green());
 }
 
 /// **Spawns a thread to read from OpenSSL's output**
-fn spawn_reader_out(stdout: ChildStdout, tx_out: Sender<String>, debug: bool) -> thread::JoinHandle<()> {
+fn spawn_reader_out(
+    stdout: ChildStdout,
+    tx_out: Sender<String>,
+    debug: bool,
+) -> thread::JoinHandle<()> {
     thread::spawn(move || {
         let reader = BufReader::new(stdout);
         if debug {

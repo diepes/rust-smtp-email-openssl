@@ -21,3 +21,7 @@ target/
 
 # sensitive environment variables
 .env
+
+# Big test files
+temp_*.zip
+temp_*.gz
