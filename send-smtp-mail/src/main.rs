@@ -48,6 +48,10 @@ fn main() {
         attachment_path
     ));
     let attachment_encoded = b64.encode(&attachment_data);
+    assert!(
+        attachment_encoded.len() % 4 == 0,
+        "Base64 output should be a multiple of 4!"
+    );
     let attachment_name = &attachment_path;
 
     println!(
@@ -64,9 +68,9 @@ fn main() {
             "-starttls",
             "smtp",
             // "-quiet", // hides "CONNECTED" message
-            "-tls1_2",
+            // "-tls1_2",
             // "-no_legacy_server_connect",
-            // "-legacy_renegotiation",
+            "-ign_eof", // Prevents OpenSSL from closing on unexpected EOF, e.g. ssl renegotiation
         ])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -94,32 +98,85 @@ fn main() {
     while let Ok(_value) = rx_out.try_recv() {}
 
     // SMTP Conversation
-    send_cmd(&stdin, "EHLO rustclient");
+    send_cmd(&stdin, debug, "EHLO rustclient");
     wait_for_response_out(&rx_out, "250 AUTH LOGIN");
     thread::sleep(std::time::Duration::from_secs(1));
 
-    send_cmd(&stdin, &format!("AUTH LOGIN"));
+    send_cmd(&stdin, debug, &format!("AUTH LOGIN"));
     // Ask for username
     wait_for_response_out(&rx_out, &format!("334 {}", b64.encode("Username:")));
-    send_cmd(&stdin, &format!("{}", b64.encode(smtp_username)));
+    send_cmd(&stdin, debug, &format!("{}", b64.encode(smtp_username)));
     wait_for_response_out(&rx_out, &format!("334 {}", b64.encode("Password:")));
-    send_cmd(&stdin, &format!("{}", b64.encode(smtp_password)));
+    send_cmd(&stdin, debug, &format!("{}", b64.encode(smtp_password)));
     wait_for_response_out(&rx_out, "235");
 
     // 535 5.7.3 Authentication unsuccessful
 
-    send_cmd(&stdin, &format!("mail from: <{}>", from));
+    send_cmd(&stdin, debug, &format!("mail from: <{}>", from));
     wait_for_response_out(&rx_out, "250");
 
-    send_cmd(&stdin, &format!("rcpt to: <{}>", to));
+    send_cmd(&stdin, debug, &format!("rcpt to: <{}>", to));
     wait_for_response_out(&rx_out, "250");
 
-    send_cmd(&stdin, "DATA");
+    send_cmd(&stdin, debug, "DATA");
     wait_for_response_out(&rx_out, "354 Start");
 
+    // MIME multipart message
+    let boundary = "boundary123456789";
+    // Use `chunked_encoded` instead of `attachment_encoded` in the email body
+
+    println!("{}", "[DEBUG] ... Sending email headers ...".purple());
+    send_cmd(
+        &stdin,
+        debug,
+        &format!(
+            "From: {from}\r\n\
+            To: {to}\r\n\
+            Subject: {subject}"
+        ),
+    );
+    println!("{}", "[DEBUG] ... Sending email mime-version ...".purple());
+    send_cmd(
+        &stdin,
+        debug,
+        &format!(
+            "MIME-Version: 1.0\r\n\
+            Content-Type: multipart/mixed; boundary=\"{boundary}\"\r\n\
+            \r\n\
+            --{boundary}\r\n\
+            Content-Type: text/plain; charset=utf-8\r\n"
+        ),
+    );
+    println!("{}", "[DEBUG] ... Sending email txt body ...".purple());
+    send_cmd(
+        &stdin,
+        debug,
+        &format!(
+            "This is the email body.\r\n\
+        \r\n\
+        Was sent from {from} to {to}.\r\n\
+        \r\n\
+        Subject: \"{subject}\"\r\n\
+        \r\n\
+        See the attached file!\r\n\
+        \r\n"
+        ),
+    );
+    // Create email mime attachment
+    send_cmd(
+        &stdin,
+        debug,
+        &format!(
+            "--{boundary}\r\n\
+            Content-Type: application/octet-stream\r\n\
+            Content-Disposition: attachment; filename=\"{attachment_name}\"\r\n\
+            Content-Transfer-Encoding: base64\r\n"
+        ),
+    );
+
     // Chunk the base64 output into lines of 76 characters
-    let chunk_size = 990; // RFC 2045 recommends 76 characters per line, RFC 3822 allows 998
-    let chunked_encoded: String = attachment_encoded
+    let chunk_size = 1024; //2048; // RFC 2045 recommends 76 characters per line, RFC 3822 allows 998
+    let chunked_encoded = attachment_encoded
         .as_bytes()
         .chunks(chunk_size)
         .map(|chunk| {
@@ -130,94 +187,62 @@ fn main() {
                 })
                 .unwrap_or("INVALID UTF-8") // Fallback if needed
         })
-        .collect::<Vec<&str>>()
-        .join("\r\n");
-
+        .collect::<Vec<&str>>();
     // Send email content
-
-    // MIME multipart message
-    let boundary = "boundary123456789";
-    // Use `chunked_encoded` instead of `attachment_encoded` in the email body
-    let _email_body = format!(
-        "From: {from}\r\n\
-        To: {to}\r\n\
-        Subject: {subject}\r\n\
-        MIME-Version: 1.0\r\n\
-        Content-Type: multipart/mixed; boundary=\"{boundary}\"\r\n\
-        \r\n\
-        --{boundary}\r\n\
-        Content-Type: text/plain; charset=utf-8\r\n\
-        \r\n\
-        This is the email body.\r\n\
-        \r\n\
-        --{boundary}\r\n\
-        Content-Type: application/octet-stream\r\n\
-        Content-Disposition: attachment; filename={attachment_name}\r\n\
-        Content-Transfer-Encoding: base64\r\n\
-        \r\n\
-        {chunked_encoded}\r\n\
-        --{boundary}--\r\n",
-        from = from,
-        to = to,
-        subject = subject,
-        boundary = boundary,
-        attachment_name = attachment_name,
-        chunked_encoded = chunked_encoded
+    println!(
+        "{}\n[{}\n...\n{}]\n{}",
+        "[DEBUG] ... Sending email attachement begining ... end".purple(),
+        chunked_encoded[1][0..120].purple(),
+        chunked_encoded[chunked_encoded.len() - 1].purple(),
+        format!(
+            "Length:{}/{}/{}x{} modulo3:{} Note: mod3=0 no padding,  mod3=1 two (==),  mod3=2 one (=)",
+            attachment_data.len(),
+            attachment_encoded.len(),
+            chunked_encoded.len(),
+            chunk_size,
+            attachment_data.len() % 3,
+        )
+        .purple()
     );
+    // Send the attachment in chunks in for loop
+    for (i, &attachment_b64_line) in chunked_encoded.iter().enumerate() {
+        if debug {
+            println!(
+                "{} {}",
+                "[DEBUG] ... Sending email attachment line:".purple(),
+                i + 1
+            );
+        };
+        send_cmd(&stdin, debug, attachment_b64_line);
+        // short sleep to avoid overwhelming the server
+        // thread::sleep(std::time::Duration::from_millis(50));
+        if let Ok(err_msg) = rx_err.try_recv() {
+            println!(
+                "{} {} {}",
+                "[DEBUG] ... Got error msg:".purple(),
+                err_msg,
+                "sleep for 5s"
+            );
+            thread::sleep(std::time::Duration::from_secs(5));
+        }
+    }
+    // send_cmd(&stdin, &chunked_encoded);
 
-    // let email_body =
-
-    // Send the email
-    println!("{}", "[DEBUG] ... Sending email body:".green());
+    println!("{}", "[DEBUG] ... Sending final mime boundary ...".purple());
     send_cmd(
         &stdin,
+        debug,
         &format!(
-            "From: {from}\r\n\
-        To: {to}\r\n\
-        Subject: {subject}\r\n\
-        MIME-Version: 1.0\r\n\
-        Content-Type: multipart/mixed; boundary=\"{boundary}\"\r\n\
-        \r\n\
-        --{boundary}\r\n\
-        Content-Type: text/plain; charset=utf-8\r\n\
-        \r\n\
-        This is the email body.\r\n\
-        \r\n\
-        Was sent from {from} to {to}.\r\n\
-        \r\n\
-        Subject: \"{subject}\"\r\n\
-        \r\n\
-        See the attached file!\r\n\
-        \r\n\
-        --{boundary}\r\n\
-        Content-Type: application/octet-stream\r\n\
-        Content-Disposition: attachment; filename=\"{attachment_name}\"\r\n\
-        Content-Transfer-Encoding: base64\r\n\
-        \r\n\
-        {chunked_encoded}\r\n\
-        \r\n\
-        --{boundary}--\r\n",
-            from = from,
-            to = to,
-            subject = subject,
-            attachment_name = attachment_name,
-            chunked_encoded = chunked_encoded,
-            boundary = boundary
+            "\r\n--{boundary}--\r\n\
+        \r\n"
         ),
     );
-    // send_cmd(&stdin, &email_body);
-
-    // sleep for 5 second
-
     // Send "." dot
-    println!(
-        "{}",
-        "[DEBUG] ... Sending final dot for email body:".green()
-    );
-    send_cmd(&stdin, "\r\n.");
+    println!("{}", "[DEBUG] ... Sending dot . to end email ...".purple());
+    send_cmd(&stdin, debug, "\r\n.");
     wait_for_response_out(&rx_out, "250");
 
-    send_cmd(&stdin, "QUIT");
+    send_cmd(&stdin, debug, "QUIT");
     wait_for_response_err(&rx_err, "DONE");
 
     // Wait for the reader thread to finish
@@ -225,7 +250,7 @@ fn main() {
     handle_err.join().unwrap();
 
     println!(
-        "{} attachment:{} ✅ Size: {}MB",
+        "{} attachment:{} ✅ b64 Size: {}MB",
         "[DEBUG] Email sent successfully!".on_green(),
         attachment_name,
         attachment_encoded.len() / 1024 / 1024
@@ -271,7 +296,7 @@ fn spawn_reader_err(
         for line in reader.lines() {
             if let Ok(line) = line {
                 if debug {
-                    println!("{} {}", "[SMTP StdErr reader]".yellow(), line.yellow());
+                    println!("{} {}", "[SMTP StdErr reader] <<".yellow(), line.yellow());
                 };
                 if tx_err.send(line).is_err() {
                     println!("{}", "[SMTP StdErr reader] !!!EXIT!!!".yellow());
@@ -290,11 +315,14 @@ fn spawn_reader_err(
 }
 
 /// **Sends an SMTP command**
-fn send_cmd(mut stdin: &ChildStdin, cmd: &str) {
+fn send_cmd(mut stdin: &ChildStdin, debug: bool, cmd: &str) {
     //let mut stdin = stdin.clone();
-    print!("{}", "[DEBUG send] Sending command:".blue());
-    write!(stdin, "{}\r\n", cmd).expect("Failed to send command");
-    println!("{} {}", "[DEBUG send] Sent:".blue(), cmd.blue());
+    // print!("{}", "[DEBUG send] Sending command:".blue());
+    if debug {
+        println!("{} {}", "[DEBUG send]".blue(), cmd.blue());
+    };
+    write!(stdin, "{}\r\n", cmd).expect("[DEBUG send] Failed to send command");
+    stdin.flush().expect("[DEBUG send] Failed to flush stdin"); // <-- Ensures data is sent immediately
 }
 
 /// **Waits for a specific response from the SMTP server**
