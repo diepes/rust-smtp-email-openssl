@@ -118,10 +118,18 @@ fn main() {
     wait_for_response_out(&rx_out, "354 Start");
 
     // Chunk the base64 output into lines of 76 characters
+    let chunk_size = 990; // RFC 2045 recommends 76 characters per line, RFC 3822 allows 998
     let chunked_encoded: String = attachment_encoded
         .as_bytes()
-        .chunks(76)
-        .map(|chunk| std::str::from_utf8(chunk).unwrap_or(""))
+        .chunks(chunk_size)
+        .map(|chunk| {
+            std::str::from_utf8(chunk)
+                .map_err(|e| {
+                    eprintln!("UTF-8 conversion error: {}", e);
+                    String::from("INVALID UTF-8") // or return a fallback chunk
+                })
+                .unwrap_or("INVALID UTF-8") // Fallback if needed
+        })
         .collect::<Vec<&str>>()
         .join("\r\n");
 
@@ -157,8 +165,14 @@ fn main() {
         chunked_encoded = chunked_encoded
     );
 
-    let email_body = format!(
-        "From: {from}\r\n\
+    // let email_body =
+
+    // Send the email
+    println!("{}", "[DEBUG] ... Sending email body:".green());
+    send_cmd(
+        &stdin,
+        &format!(
+            "From: {from}\r\n\
         To: {to}\r\n\
         Subject: {subject}\r\n\
         MIME-Version: 1.0\r\n\
@@ -177,22 +191,21 @@ fn main() {
         \r\n\
         --{boundary}\r\n\
         Content-Type: application/octet-stream\r\n\
-        Content-Disposition: attachment; filename={attachment_name}\r\n\
+        Content-Disposition: attachment; filename=\"{attachment_name}\"\r\n\
         Content-Transfer-Encoding: base64\r\n\
         \r\n\
         {chunked_encoded}\r\n\
+        \r\n\
         --{boundary}--\r\n",
-        from = from,
-        to = to,
-        subject = subject,
-        attachment_name = attachment_name,
-        chunked_encoded = chunked_encoded,
-        boundary = boundary
+            from = from,
+            to = to,
+            subject = subject,
+            attachment_name = attachment_name,
+            chunked_encoded = chunked_encoded,
+            boundary = boundary
+        ),
     );
-    // Send the email
-    thread::sleep(std::time::Duration::from_secs(1));
-    println!("{}", "[DEBUG] ... Sending email body:".green());
-    send_cmd(&stdin, &email_body);
+    // send_cmd(&stdin, &email_body);
 
     // sleep for 5 second
 
@@ -211,7 +224,12 @@ fn main() {
     handle_out.join().unwrap();
     handle_err.join().unwrap();
 
-    println!("{}", "[DEBUG] Email sent successfully!".on_green());
+    println!(
+        "{} attachment:{} ✅ Size: {}MB",
+        "[DEBUG] Email sent successfully!".on_green(),
+        attachment_name,
+        attachment_encoded.len() / 1024 / 1024
+    );
 }
 
 /// **Spawns a thread to read from OpenSSL's output**
@@ -248,17 +266,24 @@ fn spawn_reader_err(
     thread::spawn(move || {
         let reader = BufReader::new(stderr);
         if debug {
-            println!("{}", "[SMTP StdErr] !!!STARTED StdERR!!!".yellow());
+            println!("{}", "[SMTP StdErr reader] !!!STARTED StdERR!!!".yellow());
         };
         for line in reader.lines() {
             if let Ok(line) = line {
                 if debug {
-                    println!("{} {}", "[SMTP StdErr]".yellow(), line.yellow());
+                    println!("{} {}", "[SMTP StdErr reader]".yellow(), line.yellow());
                 };
                 if tx_err.send(line).is_err() {
-                    println!("{}", "[SMTP StdErr] !!!EXIT!!!".yellow());
+                    println!("{}", "[SMTP StdErr reader] !!!EXIT!!!".yellow());
+                    thread::sleep(std::time::Duration::from_secs(2));
                     break;
                 }
+            } else {
+                println!(
+                    "{} {}",
+                    "[SMTP StdErr reader]".yellow(),
+                    "!! Nothing to read ???".yellow()
+                );
             }
         }
     })
@@ -267,8 +292,9 @@ fn spawn_reader_err(
 /// **Sends an SMTP command**
 fn send_cmd(mut stdin: &ChildStdin, cmd: &str) {
     //let mut stdin = stdin.clone();
+    print!("{}", "[DEBUG send] Sending command:".blue());
     write!(stdin, "{}\r\n", cmd).expect("Failed to send command");
-    println!("{} {}", "[DEBUG stdin] Sent:".blue(), cmd.blue());
+    println!("{} {}", "[DEBUG send] Sent:".blue(), cmd.blue());
 }
 
 /// **Waits for a specific response from the SMTP server**
