@@ -4,9 +4,8 @@ use colored::*;
 use dotenv::dotenv;
 use std::env;
 use std::fs;
-//use std::io::{self, Write};
 use std::io::{BufRead, BufReader, Write};
-use std::process::{ChildStderr, ChildStdin, ChildStdout, Command, Stdio};
+use std::process::{exit, ChildStderr, ChildStdin, ChildStdout, Command, Stdio};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread;
 
@@ -240,11 +239,37 @@ fn main() {
     // Send "." dot
     println!("{}", "[DEBUG] ... Sending dot . to end email ...".purple());
     send_cmd(&stdin, debug, "\r\n.");
-    wait_for_response_out(&rx_out, "250");
+
+    if let Some((i, m, st)) = try_for_response_out(&rx_out, ["250", "501"], 5) {
+        if i == 0 {
+            println!("{} {}", "[DEBUG] ... Received :".green(), m.green().bold());
+        } else if i == 1 {
+            println!(
+                "{} {}",
+                "[DEBUG] ... Received Error:".red(),
+                st.red().bold()
+            );
+            // check if any error message
+            try_for_response_out(&rx_err, [], 2);
+            try_for_response_out(&rx_out, [], 2);
+            exit(1);
+        }
+    };
+
+    // check if any error message
+    try_for_response_out(&rx_err, [], 2);
+
+    println!(
+        "{} {}",
+        "[DEBUG] ... Sending QUIT, and waiting for DONE ...".purple(),
+        "QUIT".purple()
+    );
 
     send_cmd(&stdin, debug, "QUIT");
-    wait_for_response_err(&rx_err, "DONE");
 
+    // check if any error message
+    try_for_response_out(&rx_err, ["DONE"], 2);
+    try_for_response_out(&rx_out, ["221"], 2);
     // Wait for the reader thread to finish
     handle_out.join().unwrap();
     handle_err.join().unwrap();
@@ -348,6 +373,48 @@ fn wait_for_response_out(rx_out: &Receiver<String>, expected: &str) {
         );
     }
 }
+/// **Waits for a specific response from the SMTP server with timeout**
+/// * Returns the index of the matched string, the matched string, and the line
+fn try_for_response_out<'a, T: IntoIterator<Item = &'a str>>(
+    rx_out: &'a Receiver<String>,
+    expected: T,
+    mut timeout_sec: i32,
+) -> Option<(usize, &'a str, String)> {
+    let expected_strings = expected.into_iter().collect::<Vec<&str>>();
+    println!(
+        "{} {}",
+        "[DEBUG try StdOut] Waiting for:".green(),
+        expected_strings.join(" or ").green()
+    );
+    while timeout_sec > 0 {
+        if let Ok(line) = rx_out.try_recv() {
+            if let Some(exp_found) = expected_strings
+                .iter()
+                .enumerate()
+                .find(|(_i, &exp)| line.starts_with(exp))
+            {
+                println!(
+                    "{} {} [{}]",
+                    "[DEBUG try StdOut] matched:".green(),
+                    line.green(),
+                    exp_found.1.blue()
+                );
+                return Some((exp_found.0, exp_found.1, line));
+            } else {
+                println!(
+                    "{} {}",
+                    "[DEBUG try StdOut] ... received noise:".green(),
+                    line.green()
+                );
+            }
+        }
+        if timeout_sec >= 0 {
+            timeout_sec -= 1;
+            thread::sleep(std::time::Duration::from_secs(1));
+        }
+    }
+    None
+}
 /// **Waits for a specific response from the SMTP server**
 fn wait_for_response_err(rx_err: &Receiver<String>, expected: &str) {
     println!(
@@ -358,7 +425,7 @@ fn wait_for_response_err(rx_err: &Receiver<String>, expected: &str) {
     while let Ok(line) = rx_err.recv() {
         if line.starts_with(expected) {
             println!("{} {}", "[DEBUG wait StdErr] matched:".red(), line.red());
-            break;
+            return;
         }
         println!(
             "{} {}",
@@ -366,4 +433,9 @@ fn wait_for_response_err(rx_err: &Receiver<String>, expected: &str) {
             line.red()
         );
     }
+    println!(
+        "{} {}",
+        "[DEBUG wait StdErr] ... ERR while waiting for".red(),
+        expected.red()
+    );
 }
