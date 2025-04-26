@@ -13,6 +13,7 @@ see example .env-example
    - smtp_from=
    - smtp_to=
 
+2. run ```cargo run```
 
 ## Generate random file to test attachement
 
