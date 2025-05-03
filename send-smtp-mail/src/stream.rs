@@ -17,13 +17,17 @@ pub struct SmtpConnection {
     pub smtp_stream: Stream, // Tcp or Tls stream
     pub host: String,
     pub port: u16,
+    pub username: Option<String>,
+    pub password: Option<String>,
 }
 impl SmtpConnection {
-    pub fn new(host: &str, port: u16) -> Self {
+    pub fn new(host: &str, port: u16, username: Option<&str>, password: Option<&str>) -> Self {
         SmtpConnection {
             smtp_stream: Stream::None,
             host: host.to_string(),
             port,
+            username: username.map(|s| s.to_string()),
+            password: password.map(|s| s.to_string()),
         }
     }
     pub async fn connect_to_server(&mut self) -> Result<(), io::Error> {

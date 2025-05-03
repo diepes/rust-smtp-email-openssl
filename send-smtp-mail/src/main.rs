@@ -11,13 +11,16 @@ use std::io;
 
 #[tokio::main]
 async fn main() -> io::Result<()> {
-    let host = "smtp.azurecomm.net";
-    let port = 587; // Common port for STARTTLS
-                    // Do as little as possible in main.rs as it can't contain any tests
     log4::init_log();
+
+    // Do as little as possible in main.rs as it can't contain any tests
     let mut event_counter = 0;
-    log::info!("Setup SMTP connection to {}:{}", host, port);
-    let mut state_machine = state_machine::StateMachine::new(host, port);
+    let mut state_machine = state_machine::StateMachine::new_from_env();
+    log::info!(
+        "Setup SMTP connection to {}:{}",
+        state_machine.smtp_connection.host,
+        state_machine.smtp_connection.port
+    );
     let mut current_state = state_machine.state.clone();
     while match (&state_machine.state, event_counter) {
         (state_machine::State::Start, _) => {
@@ -58,8 +61,8 @@ async fn main() -> io::Result<()> {
         }
     }
     // from lib.rs call connect_to_server
-    log::info!("SMTP Done server at {}:{}", host, port);
+    log::info!("SMTP Done server");
 
-    //smtp_starttls::smtp_starttls(host, port).await
+    //smtp_starttls::smtp_starttls(smtp_server, port).await
     Ok(())
 }

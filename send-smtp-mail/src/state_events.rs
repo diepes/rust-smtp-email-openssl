@@ -13,6 +13,7 @@ pub enum Event {
     Received250StartTlsAuth(String),
     Received334Username,
     Received334Password,
+    AuthSuccess(String),
     Received4xx(String),
     Received5xx(String),
     Stop,
@@ -52,6 +53,10 @@ pub async fn get_event(smtp_connection: &mut stream::SmtpConnection) -> Event {
                 if line.starts_with(&format!("334 {}", b64.encode("Password:"))) {
                     log::info!("starts_with 334: {}", line);
                     return Event::Received334Password;
+                };
+                if line.starts_with("235") {
+                    log::info!("starts_with 235: {}", line);
+                    return Event::AuthSuccess(line.to_string());
                 };
                 if line.starts_with("4") {
                     log::info!("starts_with 4xx: {}", line);
