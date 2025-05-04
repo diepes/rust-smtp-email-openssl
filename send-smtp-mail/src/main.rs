@@ -30,8 +30,8 @@ async fn main() -> io::Result<()> {
                 .await;
             true
         }
-        (state_machine::State::Finished, i32::MIN..=10) => false,
-        (_, 11..=i32::MAX) => {
+        (state_machine::State::Finished, i32::MIN..=15) => false,
+        (_, 16..=i32::MAX) => {
             log::error!("Event counter exceeded 10 iterations, exiting.");
             false
         }
@@ -60,6 +60,9 @@ async fn main() -> io::Result<()> {
             current_state = state_machine.state.clone();
         }
     }
+    // done
+    let final_event = state_events::get_event(&mut state_machine.smtp_connection).await;
+    log::info!("final event: {:?}", final_event);
     // from lib.rs call connect_to_server
     log::info!("SMTP Done server");
 

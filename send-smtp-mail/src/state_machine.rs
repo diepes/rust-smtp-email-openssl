@@ -1,4 +1,5 @@
 use crate::state_events::Event;
+mod send_body;
 use crate::stream; // Replace 'some_crate' with the actual crate or module where Stream is defined
 use base64::engine::general_purpose::STANDARD as b64;
 use base64::Engine; // trait
@@ -13,16 +14,16 @@ pub enum State {
     ConnectedTcpHelloSent,
     ConnectedTcp,
     ConnectedTcpStartTls,
-    HelloAccepted,
     ConnectedTls,
+    SendingMailHeaders,
+    SendingMailData,
+    MailSent,
     Finished,
     Failed,
 }
 pub struct StateMachine {
     pub state: State,
     pub smtp_connection: stream::SmtpConnection,
-    attachement_name: Option<String>,
-    attachement_data: Option<Vec<u8>>,
 }
 impl StateMachine {
     pub async fn handle_event(&mut self, event: Event) {
@@ -49,21 +50,14 @@ impl StateMachine {
                 }
             }
             (State::ConnectingTcp, Event::Received220(_msg)) => {
-                log::info!("Transitioning from ConnectingTcp to ConnectedTcp, send EHLO");
-                match self
-                    .smtp_connection
-                    .write("EHLO rustclien\r\n".as_bytes())
-                    .await
-                {
-                    Ok(_) => {
-                        log::info!("EHLO sent successfully");
-                        State::ConnectedTcpHelloSent
-                    }
-                    Err(e) => {
-                        log::error!("Failed to send EHLO: {:?}", e);
-                        State::Failed
-                    }
-                }
+                log::info!("Transitioning from ConnectingTcp to ConnectedTcpHelloSent, send EHLO");
+                self.write_and_get_next_state(
+                    "EHLO rustclient",
+                    State::ConnectedTcpHelloSent,
+                    "EHLO sent successfully",
+                    State::Failed,
+                )
+                .await
             }
             (State::ConnectedTcpHelloSent, Event::Received250(_msg)) => {
                 log::info!("EHLO accepted, transitioning to ConnectedTcp");
@@ -74,36 +68,25 @@ impl StateMachine {
                 Event::Received250StartTls(_msg),
             ) => {
                 log::info!("Sending STARTTLS command");
-                match self.smtp_connection.write("STARTTLS\r\n".as_bytes()).await {
-                    Ok(_) => {
-                        log::info!("STARTTLS sent successfully");
-                        State::ConnectedTcpStartTls
-                    }
-                    Err(e) => {
-                        log::error!("Failed to send STARTTLS: {:?}", e);
-                        State::Failed
-                    }
-                }
+                self.write_and_get_next_state(
+                    "STARTTLS",
+                    State::ConnectedTcpStartTls,
+                    "STARTTLS sent successfully",
+                    State::Failed,
+                )
+                .await
             }
             (State::ConnectedTcpStartTls, Event::Received220(_msg)) => {
-                log::info!("STARTTLS accepted, transitioning to ConnectedTls");
+                log::info!("STARTTLS accepted server ready to transition to Tls");
                 match self.smtp_connection.switch_to_tls().await {
                     Ok(_) => {
-                        log::info!("TLS handshake completed successfully send 2nd EHLO");
-                        match self
-                            .smtp_connection
-                            .write("EHLO rustclien\r\n".as_bytes())
-                            .await
-                        {
-                            Ok(_) => {
-                                log::info!("EHLO sent successfully");
-                                State::ConnectedTls
-                            }
-                            Err(e) => {
-                                log::error!("Failed to send EHLO: {:?}", e);
-                                State::Failed
-                            }
-                        }
+                        self.write_and_get_next_state(
+                            "EHLO rustclient",
+                            State::ConnectedTls,
+                            "EHLO over TLS sent successfully",
+                            State::Failed,
+                        )
+                        .await
                     }
                     Err(e) => {
                         log::error!("Failed to switch to TLS: {:?}", e);
@@ -111,72 +94,100 @@ impl StateMachine {
                     }
                 }
             }
+            (State::ConnectedTls, Event::Received250(_msg)) => {
+                log::info!("TLS 2nd EHLO accepted, starting AUTH");
+                self.write_and_get_next_state(
+                    "AUTH LOGIN",
+                    State::ConnectedTls,
+                    "AUTH LOGIN sent successfully",
+                    State::Failed,
+                )
+                .await
+            }
             (State::ConnectedTls, Event::Received250StartTlsAuth(_msg)) => {
                 log::info!("Received request to proceed with AUTH");
                 // send "AUTH LOGIN"
-                match self
-                    .smtp_connection
-                    .write("AUTH LOGIN\r\n".as_bytes())
-                    .await
-                {
-                    Ok(_) => {
-                        log::info!("AUTH LOGIN sent successfully");
-                        State::ConnectedTls
-                    }
-                    Err(e) => {
-                        log::error!("Failed to send AUTH LOGIN: {:?}", e);
-                        State::Failed
-                    }
-                }
+                self.write_and_get_next_state(
+                    "AUTH LOGIN",
+                    State::ConnectedTls,
+                    "AUTH LOGIN sent successfully",
+                    State::Failed,
+                )
+                .await
             }
             (State::ConnectedTls, Event::Received334Username) => {
                 log::info!("Received request for username");
                 // send username
-                match self
-                    .smtp_connection
-                    .write(
-                        format!(
-                            "{}\r\n",
-                            b64.encode(self.smtp_connection.username.as_deref().unwrap_or(""))
-                        )
-                        .as_bytes(),
-                    ) // send base64 encoded username
+                if let Some(username) = self.smtp_connection.username.clone() {
+                    self.write_and_get_next_state(
+                        &b64.encode(&username),
+                        State::ConnectedTls,
+                        "Username sent successfully",
+                        State::Failed,
+                    )
                     .await
-                {
-                    Ok(_) => {
-                        log::info!("Username sent successfully");
-                        State::ConnectedTls
-                    }
-                    Err(e) => {
-                        log::error!("Failed to send username: {:?}", e);
-                        State::Failed
-                    }
+                } else {
+                    log::error!("Username not provided ?");
+                    State::Failed
                 }
             }
             (State::ConnectedTls, Event::Received334Password) => {
                 log::info!("Received request for password");
                 // send password
-                match self
-                    .smtp_connection
-                    // send base64 encoded password
-                    .write(
-                        format!(
-                            "{}\r\n",
-                            b64.encode(self.smtp_connection.password.as_deref().unwrap_or(""))
-                        )
-                        .as_bytes(),
-                    ) // base64 encoded "password"
+                if let Some(password) = self.smtp_connection.password.clone() {
+                    self.write_and_get_next_state(
+                        &b64.encode(password),
+                        State::ConnectedTls,
+                        "Password sent successfully",
+                        State::Failed,
+                    )
                     .await
-                {
-                    Ok(_) => {
-                        log::info!("Password sent successfully");
-                        State::ConnectedTls
-                    }
-                    Err(e) => {
-                        log::error!("Failed to send password: {:?}", e);
-                        State::Failed
-                    }
+                } else {
+                    log::error!("Password not provided ?");
+                    State::Failed
                 }
+            }
+            (State::ConnectedTls, Event::AuthSuccess(_)) => {
+                log::info!("AUTH successfull, ready to start sending MAIL FROM");
+                self.write_and_get_next_state(
+                    &format!("MAIL FROM:<{}>", self.smtp_connection.from),
+                    State::SendingMailHeaders,
+                    "MAIL FROM sent successfully",
+                    State::Failed,
+                )
+                .await
+            }
+
+            (State::SendingMailHeaders, Event::Received250SenderOk(_msg)) => {
+                log::info!("MAIL FROM accepted, ready to send RCPT TO");
+                self.write_and_get_next_state(
+                    &format!("RCPT TO:<{}>", self.smtp_connection.to),
+                    State::SendingMailHeaders,
+                    "RCPT TO sent successfully",
+                    State::Failed,
+                )
+                .await
+            }
+            (State::SendingMailHeaders, Event::Received250RecipientOk(_msg)) => {
+                log::info!("RCPT TO accepted, request we start sending DATA");
+                self.write_and_get_next_state(
+                    "DATA",
+                    State::SendingMailData,
+                    "DATA sent successfully",
+                    State::Failed,
+                )
+                .await
+            }
+
+            (State::SendingMailData, Event::Received354MailInput(_msg)) => {
+                log::info!("DATA accepted, ready to send email body");
+                // Send the email body
+                send_body::send_body(&mut self.smtp_connection).await
+            }
+            (State::MailSent, Event::Received250Queued(_msg)) => {
+                log::info!("Email sent successfully, transitioning to Finished");
+                self.write_and_get_next_state("QUIT", State::Finished, "QUIT", State::Failed)
+                    .await
             }
             (_, Event::Received5xx(_msg)) => {
                 log::error!("Received 5xx error, transitioning to Failed");
@@ -193,12 +204,29 @@ impl StateMachine {
         }
     }
 
-    pub fn new(host: &str, port: u16) -> Self {
-        StateMachine {
-            state: State::Start,
-            smtp_connection: stream::SmtpConnection::new(host, port, None, None),
-            attachement_name: None,
-            attachement_data: None,
+    // Helper funtion to write to stream and return next state ok or error
+    async fn write_and_get_next_state(
+        &mut self,
+        data: &str,
+        state_ok: State,
+        msg_ok: &str,
+        state_error: State,
+    ) -> State {
+        log::info!("Sending ... {}\\r\\n", data);
+        match self
+            .smtp_connection
+            // send base64 encoded password
+            .write(format!("{}\r\n", data).as_bytes()) // base64 encoded "password"
+            .await
+        {
+            Ok(_) => {
+                log::info!("{}", msg_ok);
+                state_ok
+            }
+            Err(e) => {
+                log::error!("Failed to write to stream: {:?}", e);
+                state_error
+            }
         }
     }
 
@@ -258,14 +286,18 @@ impl StateMachine {
 
         StateMachine {
             state: State::Start,
-            smtp_connection: stream::SmtpConnection::new(
-                &smtp_server,
+            smtp_connection: stream::SmtpConnection {
+                smtp_stream: stream::Stream::None,
+                host: smtp_server,
                 port,
-                Some(&smtp_username),
-                Some(&smtp_password),
-            ),
-            attachement_name: Some(attachment_name.to_string()),
-            attachement_data: Some(attachment_data),
+                username: Some(smtp_username),
+                password: Some(smtp_password),
+                attachement_name: Some(attachment_name.to_string()),
+                attachement_data: Some(attachment_data),
+                from: from,
+                to: to,
+                subject: subject,
+            },
         }
     }
 }

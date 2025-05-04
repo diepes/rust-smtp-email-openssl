@@ -14,6 +14,10 @@ pub enum Event {
     Received334Username,
     Received334Password,
     AuthSuccess(String),
+    Received250Queued(String),
+    Received250SenderOk(String),
+    Received250RecipientOk(String),
+    Received354MailInput(String),
     Received4xx(String),
     Received5xx(String),
     Stop,
@@ -43,6 +47,18 @@ pub async fn get_event(smtp_connection: &mut stream::SmtpConnection) -> Event {
                         log::info!("AUTH supported: {}", line);
                         return Event::Received250StartTlsAuth(line.to_string());
                     }
+                    if input.contains("Sender OK") {
+                        log::info!("starts_with 250: {}", line);
+                        return Event::Received250SenderOk(line.to_string());
+                    }
+                    if input.contains("Recipient OK") {
+                        log::info!("starts_with 250: {}", line);
+                        return Event::Received250RecipientOk(line.to_string());
+                    }
+                    if input.contains("Queued") {
+                        log::info!("starts_with 250: {}", line);
+                        return Event::Received250Queued(line.to_string());
+                    }
                     log::info!("starts_with 250: {}", line);
                     return Event::Received250(line.to_string());
                 };
@@ -57,6 +73,11 @@ pub async fn get_event(smtp_connection: &mut stream::SmtpConnection) -> Event {
                 if line.starts_with("235") {
                     log::info!("starts_with 235: {}", line);
                     return Event::AuthSuccess(line.to_string());
+                };
+                if line.starts_with("354") {
+                    // "354 Start mail input; end with <CRLF>.<CRLF>
+                    log::info!("starts_with 354: {}", line);
+                    return Event::Received354MailInput(line.to_string());
                 };
                 if line.starts_with("4") {
                     log::info!("starts_with 4xx: {}", line);

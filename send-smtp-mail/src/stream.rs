@@ -1,5 +1,6 @@
 use std::io;
 use std::net::ToSocketAddrs;
+use std::ops::Sub;
 use std::sync::Arc;
 use tokio::io::AsyncReadExt;
 use tokio::io::AsyncWriteExt;
@@ -19,15 +20,33 @@ pub struct SmtpConnection {
     pub port: u16,
     pub username: Option<String>,
     pub password: Option<String>,
+    pub from: String,
+    pub to: String,
+    pub subject: String,
+    pub attachement_name: Option<String>,
+    pub attachement_data: Option<Vec<u8>>,
 }
 impl SmtpConnection {
-    pub fn new(host: &str, port: u16, username: Option<&str>, password: Option<&str>) -> Self {
+    pub fn new(
+        host: &str,
+        port: u16,
+        username: Option<&str>,
+        password: Option<&str>,
+        from: &str,
+        to: &str,
+        subject: &str,
+    ) -> Self {
         SmtpConnection {
             smtp_stream: Stream::None,
             host: host.to_string(),
             port,
             username: username.map(|s| s.to_string()),
             password: password.map(|s| s.to_string()),
+            from: from.to_string(),
+            to: to.to_string(),
+            subject: subject.to_string(),
+            attachement_name: None,
+            attachement_data: None,
         }
     }
     pub async fn connect_to_server(&mut self) -> Result<(), io::Error> {
