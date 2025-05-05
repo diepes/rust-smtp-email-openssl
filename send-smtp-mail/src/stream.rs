@@ -1,6 +1,5 @@
 use std::io;
 use std::net::ToSocketAddrs;
-use std::ops::Sub;
 use std::sync::Arc;
 use tokio::io::AsyncReadExt;
 use tokio::io::AsyncWriteExt;
@@ -88,6 +87,15 @@ impl SmtpConnection {
         };
         self.smtp_stream = Stream::TlsStream(tls_stream);
         log::info!("TLS handshake completed");
+        Ok(())
+    }
+
+    pub async fn flush(&mut self) -> io::Result<()> {
+        match &mut self.smtp_stream {
+            Stream::TcpStream(s) => s.flush().await?,
+            Stream::TlsStream(s) => s.flush().await?,
+            Stream::None => return Err(io::Error::new(io::ErrorKind::Other, "Stream is None")),
+        };
         Ok(())
     }
 

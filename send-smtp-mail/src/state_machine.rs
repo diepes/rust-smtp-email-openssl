@@ -267,22 +267,13 @@ impl StateMachine {
         });
 
         // Read the attachment file (e.g., a small text file or PDF)
-        let smtp_attachment_path = env::var("smtp_attachment_path"); //.unwrap_or_else(|_| format!("")); // Replace with your file path
-        let attachment_path: String;
-        let attachment_data = if let Ok(path_provided) = smtp_attachment_path {
-            attachment_path = path_provided;
-            fs::read(&attachment_path)
-                .expect(&format!("Failed to read attachment file {attachment_path}"))
+        let smtp_attachment_path = env::var("smtp_attachment_path").ok(); //Result into Option
+        let attachment_data = if let Some(ref path_provided) = smtp_attachment_path {
+            Some(fs::read(&path_provided)
+                .expect(&format!("Failed to read attachment file {path_provided}")))
         } else {
-            attachment_path = "NO ATTACHMENT".to_string();
-            vec![]
+            None
         };
-        let attachment_encoded = b64.encode(&attachment_data);
-        assert!(
-            attachment_encoded.len() % 4 == 0,
-            "Base64 output should be a multiple of 4!"
-        );
-        let attachment_name = &attachment_path;
 
         StateMachine {
             state: State::Start,
@@ -292,8 +283,8 @@ impl StateMachine {
                 port,
                 username: Some(smtp_username),
                 password: Some(smtp_password),
-                attachement_name: Some(attachment_name.to_string()),
-                attachement_data: Some(attachment_data),
+                attachement_name: smtp_attachment_path,
+                attachement_data: attachment_data,
                 from: from,
                 to: to,
                 subject: subject,
