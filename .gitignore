@@ -25,3 +25,5 @@ target/
 # Big test files
 temp_*.zip
 temp_*.gz
+# Log files
+*.log
