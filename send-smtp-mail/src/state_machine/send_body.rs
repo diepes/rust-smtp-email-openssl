@@ -41,6 +41,7 @@ pub async fn send_body(smtp: &mut SmtpConnection) -> State {
     // log4::init_log();
     // Send the email body
     log::info!("Sending email body...");
+    // Boundary up to 70 chars, all starts with -- and only last boundary ends with --
     let boundary = "boundary123456789";
     let attachment_data_b64 = chunk_and_encode(
         &smtp.attachement_data.as_ref().unwrap_or(&Vec::new()),
@@ -55,7 +56,7 @@ pub async fn send_body(smtp: &mut SmtpConnection) -> State {
         Content-Type: multipart/mixed; boundary=\"{boundary}\"\r\n\
         \r\n\
         --{boundary}\r\n\
-        Content-Type: text/plain; charset=utf-8\r\n",
+        Content-Type: text/plain; charset=utf-8\r\n\r\n",
         from = smtp.from.clone(),
         to = smtp.to.clone(),
         subject = smtp.subject.clone(),
@@ -68,11 +69,16 @@ pub async fn send_body(smtp: &mut SmtpConnection) -> State {
         \r\n\
         Subject: \"{subject}\"\r\n\
         \r\n\
-        See the attached file!\r\n\
+        See the attached file! '{filename}'\r\n\
         \r\n",
         from = smtp.from.clone(),
         to = smtp.to.clone(),
         subject = smtp.subject.clone(),
+        filename = smtp
+            .attachement_name
+            .clone()
+            .unwrap_or_default()
+            .to_string(),
     );
     smtp.write(format!("{}{}\r\n", data_header, data_msg).as_bytes())
         .await
@@ -96,7 +102,7 @@ pub async fn send_body(smtp: &mut SmtpConnection) -> State {
             "--{boundary}\r\n\
             Content-Type: application/octet-stream\r\n\
             Content-Disposition: attachment; filename=\"{}\"\r\n\
-            Content-Transfer-Encoding: base64\r\n",
+            Content-Transfer-Encoding: base64\r\n\r\n",
             smtp.attachement_name.clone().unwrap_or_default()
         )
         .as_bytes(),
@@ -122,7 +128,7 @@ pub async fn send_body(smtp: &mut SmtpConnection) -> State {
         send_size as f64 / (1024.0 * 1024.0),
         start_send.elapsed().as_secs_f64()
     );
-    smtp.write(format!("\r\n--{boundary}--\r\n\r\n").as_bytes())
+    smtp.write(format!("\r\n\r\n--{boundary}--\r\n\r\n").as_bytes())
         .await
         .unwrap();
     smtp.flush().await.unwrap();
